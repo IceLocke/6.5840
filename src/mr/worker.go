@@ -45,9 +45,7 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	for {
-		task := CallAssignTask()
-
-		switch task.TaskType {
+		switch task := CallAssignTask(); task.TaskType {
 		case MapTask:
 			intermediate := []KeyValue{}
 
@@ -98,7 +96,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			// Report completion of the map task
 			task.Intermediates = intermediates
-			CallCompleteTask(task)
+			CallCompleteTask(&task)
 		case ReduceTask:
 			kva := []KeyValue{}
 
@@ -144,10 +142,9 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			// Rename the output filename
 			os.Rename(oname, fmt.Sprintf("mr-out-%d", task.ReduceTaskID))
-			CallCompleteTask(task)
-		default:
-			time.Sleep(100 * time.Millisecond)
+			CallCompleteTask(&task)
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 }
@@ -169,7 +166,7 @@ func CallAssignTask() Task {
 }
 
 // Call the coordinator to report task completion.
-func CallCompleteTask(task Task) {
+func CallCompleteTask(task *Task) {
 	args := CompleteTaskArgs{task.TaskType, task.MapTaskID, task.ReduceTaskID}
 	reply := CompleteTaskReply{}
 
