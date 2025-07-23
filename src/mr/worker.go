@@ -9,7 +9,6 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
-	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -29,8 +28,10 @@ func ihash(key string) int {
 }
 
 const (
+	ExitTask   = -1
 	MapTask    = 0
 	ReduceTask = 1
+	UnkownTask = 999
 )
 
 // for sorting by key.
@@ -44,6 +45,7 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+WorkerLoop:
 	for {
 		switch task := CallAssignTask(); task.TaskType {
 		case MapTask:
@@ -119,10 +121,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			sort.Sort(ByKey(kva))
 
 			// oname is the temporarily output filename, needs to be set to the final one
-			oname := fmt.Sprintf("mr-out-%d-%d", task.ReduceTaskID, os.Getpid())
-			ofile, err := os.OpenFile(oname, os.O_CREATE|os.O_WRONLY, 0644)
+			oname := fmt.Sprintf("mr-out-%d", task.ReduceTaskID)
+			wd, err := os.Getwd()
 			if err != nil {
-				log.Fatalf("cannot open %v for writing: %v", oname, err)
+				log.Fatalf("cannot get current working directory: %v", err)
+			}
+			ofile, err := os.CreateTemp(wd, oname)
+			if err != nil {
+				log.Fatalf("cannot create temporary file for %v: %v", oname, err)
 			}
 
 			// Reduce and output the collected key/value pairs
@@ -141,12 +147,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 
 			// Rename the output filename
-			os.Rename(oname, fmt.Sprintf("mr-out-%d", task.ReduceTaskID))
+			ofile.Close()
+			os.Rename(ofile.Name(), oname)
 			CallCompleteTask(&task)
+		case ExitTask:
+			fmt.Printf("[Worker %d] All tasks completed, exit.\n", os.Getpid())
+			break WorkerLoop
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-
 }
 
 // Call the coordinator to ask for a task.
@@ -167,7 +175,7 @@ func CallAssignTask() Task {
 
 // Call the coordinator to report task completion.
 func CallCompleteTask(task *Task) {
-	args := CompleteTaskArgs{task.TaskType, task.MapTaskID, task.ReduceTaskID}
+	args := CompleteTaskArgs{task.TaskType, task.MapTaskID, task.ReduceTaskID, task.Intermediates}
 	reply := CompleteTaskReply{}
 
 	ok := call("Coordinator.CompleteTask", &args, &reply)

@@ -11,19 +11,6 @@ import (
 	"strconv"
 )
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
 // Add your RPC definitions here.
 
 //
@@ -44,8 +31,8 @@ type AssignTaskReply struct {
 	NReduce       int // number of reduce tasks
 	MapTaskID     int
 	ReduceTaskID  int
-	Intermediates []int // prefixes of intermediate files for reduce task, i.e. map task IDs
-	Filename      string   // filename for map task
+	Intermediates []int  // prefixes of intermediate files for reduce task, i.e. map task IDs
+	Filename      string // filename for map task
 }
 
 // Worker -> Coordinator, report that a task is complete
@@ -53,6 +40,7 @@ type CompleteTaskArgs struct {
 	TaskType      int // 0 for map task, 1 for reduce task
 	MapTaskID     int
 	ReduceTaskID  int
+	Intermediates []int // prefixes of intermediate files for reduce task, i.e. reduce task IDs
 }
 
 // Coordinator -> Worker, reply to task completion
