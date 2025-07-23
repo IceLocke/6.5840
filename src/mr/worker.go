@@ -91,7 +91,7 @@ func Worker(mapf func(string, string) []KeyValue,
 						}
 					}
 					ifile.Close()
-					// Keep track of the intermediate files created
+					task.ReduceTaskID = i
 					intermediates = append(intermediates, i)
 				}
 			}
@@ -170,7 +170,7 @@ func CallAssignTask() Task {
 
 // Call the coordinator to report task completion.
 func CallCompleteTask(task Task) {
-	args := CompleteTaskArgs{task.TaskType, task.MapTaskID, task.ReduceTaskID, task.Intermediates}
+	args := CompleteTaskArgs{task.TaskType, task.MapTaskID, task.ReduceTaskID}
 	reply := CompleteTaskReply{}
 
 	ok := call("Coordinator.CompleteTask", &args, &reply)

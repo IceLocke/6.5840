@@ -53,7 +53,6 @@ type CompleteTaskArgs struct {
 	TaskType      int // 0 for map task, 1 for reduce task
 	MapTaskID     int
 	ReduceTaskID  int
-	Intermediates []int // suffixes of intermediate files for reduce task, i.e. reduce task IDs
 }
 
 // Coordinator -> Worker, reply to task completion
