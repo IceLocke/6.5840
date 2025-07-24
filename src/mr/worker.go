@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -28,10 +29,10 @@ func ihash(key string) int {
 }
 
 const (
-	ExitTask   = -1
-	MapTask    = 0
-	ReduceTask = 1
-	UnkownTask = 999
+	ExitTask    = -1
+	MapTask     = 0
+	ReduceTask  = 1
+	UnknownTask = 999
 )
 
 // for sorting by key.
@@ -153,6 +154,8 @@ WorkerLoop:
 		case ExitTask:
 			fmt.Printf("[Worker %d] All tasks completed, exit.\n", os.Getpid())
 			break WorkerLoop
+		case UnknownTask:
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }

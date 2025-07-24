@@ -80,6 +80,7 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	reply.TaskType = UnknownTask
 	if c.MapTasksRemaining > 0 {
 		for i, status := range c.MapTasks {
 			if status == Idle {
@@ -101,7 +102,7 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 			// 	break
 			// }
 		}
-	} else {
+	} else if c.ReduceTasksRemaining == 0 && c.MapTasksRemaining == 0 {
 		reply.TaskType = ExitTask
 	}
 
@@ -119,11 +120,11 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	case MapTask:
 		if c.MapTasks[args.MapTaskID] == InProgress {
 			c.MapTasks[args.MapTaskID] = Completed
-			c.MapTasksRemaining--
 			// Record the intermediate files for reduce tasks
 			for _, reduceID := range args.Intermediates {
 				c.Intermediates[reduceID] = append(c.Intermediates[reduceID], args.MapTaskID)
 			}
+			c.MapTasksRemaining--
 		}
 	case ReduceTask:
 		if c.ReduceTasks[args.ReduceTaskID] == InProgress {
@@ -155,6 +156,7 @@ func (c *Coordinator) Done() bool {
 	defer c.mu.Unlock()
 	done := c.MapTasksRemaining == 0 && c.ReduceTasksRemaining == 0
 	if done {
+		time.Sleep(1 * time.Second)
 		fmt.Println("[Coordinator] All tasks completed.")
 	}
 	return done
