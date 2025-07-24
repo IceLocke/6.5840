@@ -156,8 +156,7 @@ func (c *Coordinator) Done() bool {
 	defer c.mu.Unlock()
 	done := c.MapTasksRemaining == 0 && c.ReduceTasksRemaining == 0
 	if done {
-		time.Sleep(1 * time.Second)
-		fmt.Println("[Coordinator] All tasks completed.")
+		// fmt.Println("[Coordinator] All tasks completed.")
 	}
 	return done
 }
