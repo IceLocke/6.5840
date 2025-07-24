@@ -152,7 +152,7 @@ WorkerLoop:
 			os.Rename(ofile.Name(), oname)
 			CallCompleteTask(&task)
 		case ExitTask:
-			fmt.Printf("[Worker %d] All tasks completed, exit.\n", os.Getpid())
+			// fmt.Printf("[Worker %d] All tasks completed, exit.\n", os.Getpid())
 			break WorkerLoop
 		case UnknownTask:
 			time.Sleep(100 * time.Millisecond)
@@ -167,8 +167,8 @@ func CallAssignTask() Task {
 
 	ok := call("Coordinator.AssignTask", &args, &reply)
 	if ok {
-		fmt.Printf("[Worker %d] Assigned task: TaskType=%d, MapTaskID=%d, ReduceTaskID=%d, Filename=%s\n",
-			os.Getpid(), reply.TaskType, reply.MapTaskID, reply.ReduceTaskID, reply.Filename)
+		// fmt.Printf("[Worker %d] Assigned task: TaskType=%d, MapTaskID=%d, ReduceTaskID=%d, Filename=%s\n",
+		// 	os.Getpid(), reply.TaskType, reply.MapTaskID, reply.ReduceTaskID, reply.Filename)
 		return Task(reply)
 	} else {
 		log.Fatalf("CallAssignTask failed")
@@ -183,8 +183,8 @@ func CallCompleteTask(task *Task) {
 
 	ok := call("Coordinator.CompleteTask", &args, &reply)
 	if ok {
-		fmt.Printf("[Worker %d] Completed and reported task: TaskType=%d, MapTaskID=%d, ReduceTaskID=%d\n",
-			os.Getpid(), task.TaskType, task.MapTaskID, task.ReduceTaskID)
+		// fmt.Printf("[Worker %d] Completed and reported task: TaskType=%d, MapTaskID=%d, ReduceTaskID=%d\n",
+		// 	os.Getpid(), task.TaskType, task.MapTaskID, task.ReduceTaskID)
 	} else {
 		log.Fatalf("CallCompleteTask failed")
 	}
