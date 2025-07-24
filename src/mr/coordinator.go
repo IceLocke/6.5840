@@ -155,9 +155,6 @@ func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	done := c.MapTasksRemaining == 0 && c.ReduceTasksRemaining == 0
-	if done {
-		// fmt.Println("[Coordinator] All tasks completed.")
-	}
 	return done
 }
 
