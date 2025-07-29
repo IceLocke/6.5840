@@ -1,0 +1,2 @@
+Q: How does VM FT handle network partitions? That is, is it possible that if the primary and the backup end up in different network partitions that the backup will become a primary too and the system will run with two primaries?
+A: VM FT 通过共享的存储防止 split-brain 现象。如果一个 VM 需要 "go alive"，会在共享存储中通过原子的设置是否有 VM 正在运行状态。
