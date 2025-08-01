@@ -1,5 +1,10 @@
 package rpc
 
+import (
+	"os"
+	"strconv"
+)
+
 type Err string
 
 const (
@@ -38,3 +43,8 @@ type GetReply struct {
 	Err     Err
 }
 
+func ServerSock() string {
+	s := "/var/tmp/5840-kvsrv1-"
+	s += strconv.Itoa(os.Getuid())
+	return s
+}
