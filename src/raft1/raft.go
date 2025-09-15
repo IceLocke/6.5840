@@ -287,12 +287,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) noLeader() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.leaderId == -1
-}
-
 func (rf *Raft) noHeartbeat() bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -429,7 +423,7 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
-		if rf.noLeader() || rf.noHeartbeat() {
+		if rf.noHeartbeat() {
 			// fmt.Printf("Node %d starting election\n", rf.me)
 			go rf.startElection()
 		}
