@@ -35,7 +35,7 @@ type Raft struct {
 	// Persistent state on all servers:
 	currentTerm int
 	heartbeat   bool
-	leaderId    int32
+	leaderId    int
 	votedFor    int
 	votes       int
 	log         []LogEntry
@@ -56,7 +56,7 @@ type LogEntry struct {
 
 type AppendEntriesArgs struct {
 	Term         int
-	LeaderId     int32
+	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
@@ -97,7 +97,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (3A).
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = rf.leaderId == int32(rf.me)
+	isleader = rf.leaderId == rf.me
 	rf.mu.Unlock()
 	return term, isleader
 }
@@ -259,9 +259,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := rf.leaderId == rf.me
 
 	// Your code here (3B).
 
@@ -331,7 +333,7 @@ func (rf *Raft) callSendHeartbeat(server int, args *AppendEntriesArgs) {
 func (rf *Raft) startAsLeader() {
 	// fmt.Printf("Node %d became leader for term %d\n", rf.me, rf.currentTerm)
 	rf.mu.Lock()
-	rf.leaderId = int32(rf.me)
+	rf.leaderId = rf.me
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
@@ -342,7 +344,7 @@ func (rf *Raft) startAsLeader() {
 
 	args := &AppendEntriesArgs{
 		Term:         term,
-		LeaderId:     int32(rf.me),
+		LeaderId:     rf.me,
 		PrevLogIndex: len(rf.log) - 1,
 		PrevLogTerm:  rf.log[len(rf.log)-1].Term,
 		Entries:      []LogEntry{},
