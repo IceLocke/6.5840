@@ -375,8 +375,8 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 }
 
 func (rf *Raft) callSendAppendEntries(server int, repCount *int) {
-	args := rf.buildAppendEntriesArgs(server)
 	for !rf.killed() && rf.isLeader() {
+		args := rf.buildAppendEntriesArgs(server)
 		reply := &AppendEntriesReply{}
 		if ok := rf.sendAppendEntries(server, args, reply); ok {
 			rf.mu.Lock()
@@ -401,7 +401,6 @@ func (rf *Raft) callSendAppendEntries(server int, repCount *int) {
 					rf.nextIndex[server] = 1
 				}
 				rf.mu.Unlock()
-				args = rf.buildAppendEntriesArgs(server)
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
