@@ -7,11 +7,13 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -32,11 +34,12 @@ type Raft struct {
 
 	// Persistent state on all servers:
 	currentTerm int
+	votedFor    int
+	log         []LogEntry
+	// additional state
 	heartbeat   bool
 	leaderId    int
-	votedFor    int
 	votes       int
-	log         []LogEntry
 
 	// Volatile state on all servers:
 	commitIndex int
@@ -94,12 +97,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.log[args.PrevLogIndex+1+i].Term != entry.Term {
 				rf.log = rf.log[:args.PrevLogIndex+1+i]
 				rf.log = append(rf.log, args.Entries[i:]...)
+				rf.persist()
 				break
 			}
 		}
 		// append any new entries not already in the log
 		if args.PrevLogIndex+1+i >= len(rf.log) {
 			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -138,12 +143,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -153,17 +159,19 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		DPrintf("error: decoding persisted state")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -217,6 +225,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 		rf.leaderId = -1
 	}
 	if rf.votedFor != -1 {
@@ -231,6 +240,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// at least as up-to-date as receiver's log
 		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
 			rf.votedFor = args.CandidiateId
+			rf.persist()
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
 			DPrintf("[%d](term=%d) voted for [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
@@ -296,7 +306,7 @@ func (rf *Raft) checkCommit() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond) 
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -324,6 +334,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    rf.currentTerm,
 			Command: command,
 		})
+		rf.persist()
 		DPrintf("[%d](term=%d) received command %.8v, appended to log at index %d\n", rf.me, rf.currentTerm, command, index)
 		for i := range rf.peers {
 			if i != rf.me {
@@ -391,6 +402,7 @@ func (rf *Raft) callSendRequestVote(server int, args *RequestVoteArgs) {
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
+			rf.persist()
 			rf.leaderId = -1
 		}
 	}
@@ -423,6 +435,7 @@ func (rf *Raft) callSendAppendEntries(server int) {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
+				rf.persist()
 				rf.leaderId = -1
 				rf.mu.Unlock()
 				return
@@ -504,10 +517,11 @@ func (rf *Raft) checkElection() {
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	// DPrintf("[%d](term=%d) starts election", rf.me, rf.currentTerm+1)
-	rf.votes = 1
 	rf.votedFor = rf.me
-	rf.leaderId = -1
 	rf.currentTerm += 1
+	rf.persist()
+	rf.votes = 1
+	rf.leaderId = -1
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidiateId: rf.me,
