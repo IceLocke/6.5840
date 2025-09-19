@@ -97,7 +97,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.log) + rf.lastIncludedIndex || rf.log[args.PrevLogIndex - rf.lastIncludedIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -107,18 +107,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// but different terms), delete the existing entry and all that
 	// follow it
 	for i, entry := range args.Entries {
-		if args.PrevLogIndex+1+i < len(rf.log) {
+		if args.PrevLogIndex+1+i < len(rf.log) + rf.lastIncludedIndex {
 			// if conflict, delete the existing entry and all that follow it
-			if rf.log[args.PrevLogIndex+1+i].Term != entry.Term {
+			if rf.log[args.PrevLogIndex+1+i-rf.lastIncludedIndex].Term != entry.Term {
 				// avoid memory leak
-				rf.log = truncateAndCopyBefore(rf.log, args.PrevLogIndex+i)
+				rf.log = truncateAndCopyBefore(rf.log, args.PrevLogIndex+i-rf.lastIncludedIndex)
 				rf.log = append(rf.log, args.Entries[i:]...)
 				rf.persist()
 				break
 			}
 		}
 		// append any new entries not already in the log
-		if args.PrevLogIndex+1+i >= len(rf.log) {
+		if args.PrevLogIndex+1+i >= len(rf.log) + rf.lastIncludedIndex {
 			rf.log = append(rf.log, args.Entries[i:]...)
 			rf.persist()
 			break
@@ -164,6 +164,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.LastIncludedTerm)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
 }
@@ -180,13 +182,17 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
 		DPrintf("error: decoding persisted state")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.LastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -222,7 +228,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.log = truncateAndCopyAfter(rf.log, index)
+	rf.log = truncateAndCopyAfter(rf.log, index - rf.lastIncludedIndex)
+	rf.lastIncludedIndex = index
 	rf.persist()
 }
 
@@ -272,7 +279,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// if votedFor is null or candidateId
 	if rf.votedFor == -1 || rf.votedFor == args.CandidiateId {
 		lastLogTerm := rf.log[len(rf.log)-1].Term
-		lastLogIndex := len(rf.log) - 1
+		lastLogIndex := len(rf.log) - 1 + rf.lastIncludedIndex
 		// at least as up-to-date as receiver's log
 		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
 			rf.votedFor = args.CandidiateId
@@ -324,8 +331,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) checkCommit() {
 	for !rf.killed() && rf.isLeader() {
 		rf.mu.Lock()
-		for n := rf.commitIndex + 1; n < len(rf.log); n++ {
-			if rf.log[n].Term != rf.currentTerm {
+		for n := rf.commitIndex + 1; n < len(rf.log) + rf.lastIncludedIndex; n++ {
+			if rf.log[n - rf.lastIncludedIndex].Term != rf.currentTerm {
 				continue
 			}
 			count := 1
@@ -335,7 +342,7 @@ func (rf *Raft) checkCommit() {
 				}
 			}
 			if count > len(rf.peers)/2 {
-				if rf.log[n].Term == rf.currentTerm {
+				if rf.log[n - rf.lastIncludedIndex].Term == rf.currentTerm {
 					rf.commitIndex = n
 				}
 				DPrintf("[%d](term=%d) commit log at index %d\n", rf.me, rf.currentTerm, n)
@@ -361,7 +368,7 @@ func (rf *Raft) checkCommit() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index, term := len(rf.log), rf.currentTerm
+	index, term := len(rf.log) + rf.lastIncludedIndex, rf.currentTerm
 	isLeader := rf.leaderId == rf.me
 
 	// Your code here (3B).
@@ -451,12 +458,12 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: rf.nextIndex[server] - 1,
-		PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+		PrevLogTerm:  rf.log[rf.nextIndex[server]-1-rf.lastIncludedIndex].Term,
 		Entries:      make([]LogEntry, 0),
 		LeaderCommit: rf.commitIndex,
 	}
-	for i := rf.nextIndex[server]; i < len(rf.log); i++ {
-		args.Entries = append(args.Entries, rf.log[i])
+	for i := rf.nextIndex[server]; i < len(rf.log) + rf.lastIncludedIndex; i++ {
+		args.Entries = append(args.Entries, rf.log[i-rf.lastIncludedIndex])
 	}
 
 	return args
@@ -510,7 +517,7 @@ func (rf *Raft) startAsLeader() {
 	DPrintf("[%d](term=%d) became leader", rf.me, rf.currentTerm)
 	rf.leaderId = rf.me
 	for i := range rf.peers {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = len(rf.log) + rf.lastIncludedIndex
 		rf.matchIndex[i] = 0
 	}
 	rf.mu.Unlock()
@@ -561,7 +568,7 @@ func (rf *Raft) startElection() {
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidiateId: rf.me,
-		LastLogIndex: len(rf.log) - 1,
+		LastLogIndex: len(rf.log) - 1 + rf.lastIncludedIndex,
 		LastLogTerm:  rf.log[len(rf.log)-1].Term,
 	}
 	rf.mu.Unlock()
@@ -584,7 +591,7 @@ func (rf *Raft) applyCommit() {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				applyMsgs = append(applyMsgs, raftapi.ApplyMsg{
 					CommandValid: true,
-					Command:      rf.log[i].Command,
+					Command:      rf.log[i-rf.lastIncludedIndex].Command,
 					CommandIndex: i,
 				})
 			}
