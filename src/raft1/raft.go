@@ -37,9 +37,12 @@ type Raft struct {
 	votedFor    int
 	log         []LogEntry
 	// additional state
-	heartbeat   bool
-	leaderId    int
-	votes       int
+	heartbeat bool
+	leaderId  int
+	votes     int
+	// snapshot state
+	lastIncludedIndex int
+	LastIncludedTerm int
 
 	// Volatile state on all servers:
 	commitIndex int
@@ -69,6 +72,18 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func truncateAndCopyBefore(log []LogEntry, index int) []LogEntry {
+	newLog := make([]LogEntry, index+1)
+	copy(newLog, log[:index+1])
+	return newLog
+}
+
+func truncateAndCopyAfter(log []LogEntry, index int) []LogEntry {
+	newLog := make([]LogEntry, len(log)-index)
+	copy(newLog, log[index:])
+	return newLog
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -95,7 +110,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.PrevLogIndex+1+i < len(rf.log) {
 			// if conflict, delete the existing entry and all that follow it
 			if rf.log[args.PrevLogIndex+1+i].Term != entry.Term {
-				rf.log = rf.log[:args.PrevLogIndex+1+i]
+				// avoid memory leak
+				rf.log = truncateAndCopyBefore(rf.log, args.PrevLogIndex+i)
 				rf.log = append(rf.log, args.Entries[i:]...)
 				rf.persist()
 				break
@@ -181,13 +197,33 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+	Done              bool
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+}
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.log = truncateAndCopyAfter(rf.log, index)
+	rf.persist()
 }
 
 // example RequestVote RPC arguments structure.
@@ -616,6 +652,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.nextIndex[i] = 1
 	}
 	rf.matchIndex = make([]int, len(peers))
+	rf.lastIncludedIndex = 0
+	rf.LastIncludedTerm = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
