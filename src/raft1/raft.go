@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"log"
 
 	"6.5840/labrpc"
 	"6.5840/raftapi"
@@ -91,20 +90,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// follow it
 	for i, entry := range args.Entries {
 		if args.PrevLogIndex+1+i < len(rf.log) {
+			// if conflict, delete the existing entry and all that follow it
 			if rf.log[args.PrevLogIndex+1+i].Term != entry.Term {
 				rf.log = rf.log[:args.PrevLogIndex+1+i]
+				rf.log = append(rf.log, args.Entries[i:]...)
 				break
 			}
 		}
+		// append any new entries not already in the log
+		if args.PrevLogIndex+1+i >= len(rf.log) {
+			rf.log = append(rf.log, args.Entries[i:]...)
+			break
+		}
 	}
-
-	// append any new entries not already in the log
-	rf.log = append(rf.log, args.Entries...)
 
 	// if leaderCommit > commitIndex, set commitIndex =
 	// min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		lastNewEntryIndex := args.PrevLogIndex + len(args.Entries)
+		DPrintf("[%d](term=%d) update commitIndex %d -> %d\n", rf.me, rf.currentTerm, rf.commitIndex, min(args.LeaderCommit, lastNewEntryIndex))
 		rf.commitIndex = min(args.LeaderCommit, lastNewEntryIndex)
 	}
 	reply.Success = true
@@ -200,7 +204,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
-	log.Printf("[%d](term=%d) received RequestVote from [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
+	// DPrintf("[%d](term=%d) received RequestVote from [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
 	defer rf.mu.Unlock()
 
 	// reply false if term < currentTerm
@@ -229,7 +233,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidiateId
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
-			log.Printf("[%d](term=%d) voted for [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
+			DPrintf("[%d](term=%d) voted for [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
 		}
 	}
 }
@@ -271,6 +275,31 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+func (rf *Raft) checkCommit() {
+	for !rf.killed() && rf.isLeader() {
+		rf.mu.Lock()
+		for n := rf.commitIndex + 1; n < len(rf.log); n++ {
+			if rf.log[n].Term != rf.currentTerm {
+				continue
+			}
+			count := 1
+			for i := range rf.peers {
+				if i != rf.me && rf.matchIndex[i] >= n {
+					count += 1
+				}
+			}
+			if count > len(rf.peers)/2 {
+				if rf.log[n].Term == rf.currentTerm {
+					rf.commitIndex = n
+				}
+				DPrintf("[%d](term=%d) commit log at index %d\n", rf.me, rf.currentTerm, n)
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond) 
+	}
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -286,18 +315,29 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index := -1
-	term := -1
+	index, term := len(rf.log), rf.currentTerm
 	isLeader := rf.leaderId == rf.me
 
 	// Your code here (3B).
+	if isLeader {
+		rf.log = append(rf.log, LogEntry{
+			Term:    rf.currentTerm,
+			Command: command,
+		})
+		DPrintf("[%d](term=%d) received command %.8v, appended to log at index %d\n", rf.me, rf.currentTerm, command, index)
+		for i := range rf.peers {
+			if i != rf.me {
+				go rf.callSendAppendEntries(i)
+			}
+		}
+	}
 
 	return index, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
+// check whether Kill() has been called. the use of atomic avoids the~
 // need for a lock.
 //
 // the issue is that long-running goroutines use memory and may chew
@@ -374,7 +414,7 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 	return args
 }
 
-func (rf *Raft) callSendAppendEntries(server int, repCount *int) {
+func (rf *Raft) callSendAppendEntries(server int) {
 	for !rf.killed() && rf.isLeader() {
 		args := rf.buildAppendEntriesArgs(server)
 		reply := &AppendEntriesReply{}
@@ -388,51 +428,48 @@ func (rf *Raft) callSendAppendEntries(server int, repCount *int) {
 				return
 			}
 			if reply.Success {
-				if repCount != nil {
-					*repCount += 1
-				}
 				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
 				rf.mu.Unlock()
 				return
 			} else {
-				rf.nextIndex[server] -= 1
+				// optimize by fast backoff
+				rf.nextIndex[server] = (rf.nextIndex[server] + 1) / 2
 				if rf.nextIndex[server] < 1 {
 					rf.nextIndex[server] = 1
 				}
 				rf.mu.Unlock()
 			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(35 * time.Millisecond)
+	}
+}
+
+func (rf *Raft) sendHeartbeat() {
+	for !rf.killed() && rf.isLeader() {
+		for i := range rf.peers {
+			if i != rf.me {
+				go rf.callSendAppendEntries(i)
+			}
+		}
+		time.Sleep(35 * time.Millisecond)
 	}
 }
 
 func (rf *Raft) startAsLeader() {
 	rf.mu.Lock()
-	log.Printf("[%d](term=%d) became leader", rf.me, rf.currentTerm)
+	DPrintf("[%d](term=%d) became leader", rf.me, rf.currentTerm)
 	rf.leaderId = rf.me
 	for i := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
-	term := rf.currentTerm
 	rf.mu.Unlock()
 
 	// heartbeat cycle
-	for !rf.killed() && rf.isLeader() {
-		rf.mu.Lock()
-		if rf.currentTerm != term {
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
-		for i := range rf.peers {
-			if i != rf.me {
-				go rf.callSendAppendEntries(i, nil)
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	go rf.sendHeartbeat()
+	// check commit cycle
+	go rf.checkCommit()
 }
 
 func (rf *Raft) checkElection() {
@@ -466,7 +503,7 @@ func (rf *Raft) checkElection() {
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	log.Printf("[%d](term=%d) starts election", rf.me, rf.currentTerm+1)
+	// DPrintf("[%d](term=%d) starts election", rf.me, rf.currentTerm+1)
 	rf.votes = 1
 	rf.votedFor = rf.me
 	rf.leaderId = -1
@@ -501,8 +538,10 @@ func (rf *Raft) applyCommit() {
 					CommandIndex: i,
 				})
 			}
+			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
 			for _, msg := range applyMsgs {
+				DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, msg.CommandIndex, msg.Command)
 				rf.applyCh <- msg
 			}
 		} else {
