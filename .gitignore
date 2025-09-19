@@ -2,3 +2,4 @@ pkg/
 bin/
 *-handin.tar.gz
 src/.DS_Store
+log.txt
