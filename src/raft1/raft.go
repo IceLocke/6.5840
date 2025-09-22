@@ -400,7 +400,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if index > rf.lastIncludedIndex {
+	if index > rf.lastIncludedIndex && index <= rf.lastApplied {
 		rf.lastIncludedTerm = rf.log[rf.realIdx(index)].Term
 		rf.log = truncateAndCopyAfter(rf.log, rf.realIdx(index))
 		rf.lastIncludedIndex = index
