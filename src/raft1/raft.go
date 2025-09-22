@@ -76,8 +76,8 @@ func truncateAndCopyBefore(log []LogEntry, index int) []LogEntry {
 }
 
 func truncateAndCopyAfter(log []LogEntry, index int) []LogEntry {
-	newLog := make([]LogEntry, len(log)-index+1)
-	copy(newLog[1:], log[index:])
+	newLog := make([]LogEntry, len(log)-index)
+	copy(newLog[1:], log[index+1:])
 	return newLog
 }
 
@@ -89,6 +89,12 @@ func (rf *Raft) realIdx(i int) int {
 // convert real index in rf.log to global index
 func (rf *Raft) globalIdx(i int) int {
 	return i + rf.lastIncludedIndex
+}
+
+func (rf *Raft) prtLog() {
+	for i := 0; i < len(rf.log); i++ {
+		DPrintf("\t[%d](term=%d) log[%d] = (term=%d, cmd=%.8v)\n", rf.me, rf.currentTerm, rf.globalIdx(i), rf.log[i].Term, rf.log[i].Command)
+	}
 }
 
 //
@@ -257,7 +263,56 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// reply false if term < currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	// accept the InstallSnapshot RPC
+	DPrintf("[%d](term=%d) received InstallSnapshot from [%d](term=%d) lastIncludedIndex=%d lastIncludedTerm=%d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludedTerm)
+	rf.heartbeat = true
+	rf.leaderId = args.LeaderId
+	rf.currentTerm = args.Term
+	rf.persist()
+	reply.Term = rf.currentTerm
 
+	// no more new information
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		return
+	}
+	DPrintf("[%d](term=%d) install snapshot lastIncludedIndex %d -> %d, lastIncludedTerm %d -> %d\n", rf.me, rf.currentTerm, rf.lastIncludedIndex, args.LastIncludedIndex, rf.lastIncludedTerm, args.LastIncludedTerm)
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex 
+	rf.snapshot = args.Data
+	msg := raftapi.ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      rf.snapshot,
+		SnapshotTerm:  rf.lastIncludedTerm,
+		SnapshotIndex: rf.lastIncludedIndex,
+	}
+
+	// if existing log entry has same index and term as snapshot's
+	if args.LastIncludedIndex > rf.lastIncludedIndex {
+		if args.LastIncludedIndex < rf.globalIdx(len(rf.log)) && rf.log[rf.realIdx(args.LastIncludedIndex)].Term == args.LastIncludedTerm {
+			rf.log = truncateAndCopyAfter(rf.log, rf.realIdx(args.LastIncludedIndex))
+			rf.log[0].Term = args.LastIncludedTerm
+			rf.persist()
+			go func() { rf.applyCh <- msg }()
+			// DPrintf("[%d](term=%d) keep log after snapshot: ", rf.me, rf.currentTerm)
+			// rf.prtLog()
+			return
+		}
+	}
+
+	// DPrintf("[%d](term=%d) discard log and keep only snapshot\n", rf.me, rf.currentTerm)
+	rf.log = []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
+	go func() {  rf.applyCh <- msg }()
+	// rf.prtLog()
 }
 
 // return currentTerm and whether this server
@@ -335,10 +390,59 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.log = truncateAndCopyAfter(rf.log, index)
-	rf.persist()
+	if index > rf.lastIncludedIndex {
+		rf.mu.Lock()
+		rf.lastIncludedTerm = rf.log[rf.realIdx(index)].Term
+		rf.log = truncateAndCopyAfter(rf.log, rf.realIdx(index))
+		rf.lastIncludedIndex = index
+		rf.log[0].Term = rf.lastIncludedTerm
+		DPrintf("[%d](term=%d) create snapshot at index %d\n", rf.me, rf.currentTerm, index)
+		rf.prtLog()
+		rf.snapshot = snapshot
+		rf.persist()
+		rf.mu.Unlock()
+		
+		for i := range rf.peers {
+			rf.mu.Lock()
+			if i != rf.me && rf.nextIndex[i] <= rf.lastIncludedIndex {
+				go rf.callSendInstallSnapshot(i)
+			}
+			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) callSendInstallSnapshot(server int) {
+	for !rf.killed() && rf.isLeader() {
+		rf.mu.Lock()
+		if rf.nextIndex[server] > rf.lastIncludedIndex {
+			break
+		}
+		args := &InstallSnapshotArgs{
+			Term:              rf.currentTerm,
+			LeaderId:          rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			Data:              rf.snapshot,
+		}
+		reply := &InstallSnapshotReply{}
+		if ok := rf.sendInstallSnapshot(server, args, reply); ok {
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.leaderId = -1
+				rf.persist()
+				rf.mu.Unlock()
+				return
+			}
+			rf.nextIndex[server] = rf.lastIncludedIndex + 1
+			rf.matchIndex[server] = rf.lastIncludedIndex
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -378,6 +482,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
 func (rf *Raft) checkCommit() {
 	for !rf.killed() && rf.isLeader() {
 		rf.mu.Lock()
@@ -392,6 +501,7 @@ func (rf *Raft) checkCommit() {
 				}
 			}
 			if count > len(rf.peers)/2 {
+				// DPrintf("[%d](term=%d) increase commitIndex %d -> %d\n", rf.me, rf.currentTerm, rf.commitIndex, n)
 				rf.commitIndex = n
 			}
 		}
@@ -493,36 +603,42 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 	for i := rf.nextIndex[server]; i < rf.globalIdx(len(rf.log)); i++ {
 		args.Entries = append(args.Entries, rf.log[rf.realIdx(i)])
 	}
-
 	return args
 }
 
 func (rf *Raft) callSendAppendEntries(server int) {
 	for !rf.killed() && rf.isLeader() {
-		args := rf.buildAppendEntriesArgs(server)
-		reply := &AppendEntriesReply{}
-		if ok := rf.sendAppendEntries(server, args, reply); ok {
-			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.votedFor = -1
-				rf.leaderId = -1
-				rf.persist()
-				rf.mu.Unlock()
-				return
-			}
-			if reply.Success {
-				rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-				rf.matchIndex[server] = rf.nextIndex[server] - 1
-				rf.mu.Unlock()
-				return
-			} else {
-				// optimize by fast backoff
-				rf.nextIndex[server] = (rf.nextIndex[server] + 1) / 2
-				if rf.nextIndex[server] < 1 {
-					rf.nextIndex[server] = 1
+		rf.mu.Lock()
+		if rf.nextIndex[server] <= rf.lastIncludedIndex {
+			go rf.callSendInstallSnapshot(server)
+			rf.mu.Unlock()
+		} else {
+			rf.mu.Unlock()
+			args := rf.buildAppendEntriesArgs(server)
+			reply := &AppendEntriesReply{}
+			if ok := rf.sendAppendEntries(server, args, reply); ok {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					rf.leaderId = -1
+					rf.persist()
+					rf.mu.Unlock()
+					return
 				}
-				rf.mu.Unlock()
+				if reply.Success {
+					rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+					rf.matchIndex[server] = rf.nextIndex[server] - 1
+					rf.mu.Unlock()
+					return
+				} else {
+					// optimize by fast backoff
+					rf.nextIndex[server] = (rf.nextIndex[server] + 1) / 2
+					if rf.nextIndex[server] < 1 {
+						rf.nextIndex[server] = 1
+					}
+					rf.mu.Unlock()
+				}
 			}
 		}
 		time.Sleep(35 * time.Millisecond)
@@ -587,7 +703,7 @@ func (rf *Raft) checkElection() {
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	// DPrintf("[%d](term=%d) starts election", rf.me, rf.currentTerm+1)
+	DPrintf("[%d](term=%d) starts election", rf.me, rf.currentTerm+1)
 	rf.votedFor = rf.me
 	rf.currentTerm += 1
 	rf.persist()
@@ -622,13 +738,11 @@ func (rf *Raft) applyCommit() {
 					Command:      rf.log[rf.realIdx(i)].Command,
 					CommandIndex: i,
 				})
+				DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, i, rf.log[rf.realIdx(i)].Command)
 			}
 			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
 			for _, msg := range applyMsgs {
-				rf.mu.Lock()
-				DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, msg.CommandIndex, msg.Command)
-				rf.mu.Unlock()
 				rf.applyCh <- msg
 			}
 		} else {
