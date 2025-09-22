@@ -8,6 +8,7 @@ package raft
 
 import (
 	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -494,7 +495,7 @@ func (rf *Raft) checkCommit() {
 	for !rf.killed() && rf.isLeader() {
 		rf.mu.Lock()
 		for n := rf.commitIndex + 1; n < rf.globalIdx(len(rf.log)); n++ {
-			if rf.log[rf.realIdx(n)].Term != rf.currentTerm {
+			if rf.realIdx(n) < 0 || rf.log[rf.realIdx(n)].Term != rf.currentTerm {
 				continue
 			}
 			count := 1
@@ -741,7 +742,8 @@ func (rf *Raft) applyCommit() {
 					Command:      rf.log[rf.realIdx(i)].Command,
 					CommandIndex: i,
 				})
-				DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, i, rf.log[rf.realIdx(i)].Command)
+				log.Printf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, i, rf.log[rf.realIdx(i)].Command)
+				// DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, i, rf.log[rf.realIdx(i)].Command)
 			}
 			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
@@ -751,7 +753,7 @@ func (rf *Raft) applyCommit() {
 		} else {
 			rf.mu.Unlock()
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
