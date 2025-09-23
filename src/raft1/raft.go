@@ -8,7 +8,7 @@ package raft
 
 import (
 	"bytes"
-	"log"
+	// "fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -22,12 +22,13 @@ import (
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *tester.Persister   // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
-	applyCh   chan raftapi.ApplyMsg
+	mu                sync.Mutex          // Lock to protect shared access to this peer's state
+	peers             []*labrpc.ClientEnd // RPC end points of all peers
+	persister         *tester.Persister   // Object to hold this peer's persisted state
+	me                int                 // this peer's index into peers[]
+	dead              int32               // set by Kill()
+	applyCh           chan raftapi.ApplyMsg
+	applyChBuffer	  chan raftapi.ApplyMsg
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
@@ -294,7 +295,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.commitIndex = rf.lastIncludedIndex
-	rf.lastApplied = rf.lastIncludedIndex 
+	needApplySnap := rf.lastApplied <= rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
 	rf.snapshot = args.Data
 	msg := raftapi.ApplyMsg{
 		CommandValid:  false,
@@ -310,7 +312,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			rf.log = truncateAndCopyAfter(rf.log, rf.realIdx(args.LastIncludedIndex))
 			rf.log[0].Term = args.LastIncludedTerm
 			rf.persist()
-			go func() { rf.applyCh <- msg }()
+			if needApplySnap {
+				go func() { rf.applyChBuffer <- msg }()
+			}
 			DPrintf("[%d](term=%d) keep log after snapshot: ", rf.me, rf.currentTerm)
 			rf.prtLog()
 			return
@@ -319,7 +323,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	// DPrintf("[%d](term=%d) discard log and keep only snapshot\n", rf.me, rf.currentTerm)
 	rf.log = []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
-	go func() {  rf.applyCh <- msg }()
+	go func() { rf.applyChBuffer <- msg }()
 	rf.prtLog()
 	rf.heartbeat = true
 }
@@ -382,6 +386,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.lastIncludedTerm = state.LastIncludedTerm
 		rf.log[0].Term = state.LastIncludedTerm
 		rf.lastApplied = state.LastIncludedIndex
+		rf.commitIndex = state.LastIncludedIndex
 		rf.snapshot = rf.persister.ReadSnapshot()
 	}
 }
@@ -410,7 +415,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.prtLog()
 		rf.snapshot = snapshot
 		rf.persist()
-		
 		for i := range rf.peers {
 			if i != rf.me && rf.nextIndex[i] <= rf.lastIncludedIndex {
 				go rf.callSendInstallSnapshot(i)
@@ -540,6 +544,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		rf.persist()
 		DPrintf("[%d](term=%d) received command %.8v, appended to log at index %d\n", rf.me, rf.currentTerm, command, index)
+		go func() {}()
 		for i := range rf.peers {
 			if i != rf.me {
 				go rf.callSendAppendEntries(i)
@@ -730,6 +735,15 @@ func (rf *Raft) startElection() {
 	go rf.checkElection()
 }
 
+func (rf *Raft) sendApplyMsg() {
+	for msg := range rf.applyChBuffer {
+		if rf.killed() {
+			return
+		}
+		rf.applyCh <- msg
+	}
+}
+
 // Started as a goroutine to apply committed entries to state machine
 func (rf *Raft) applyCommit() {
 	for !rf.killed() {
@@ -737,22 +751,21 @@ func (rf *Raft) applyCommit() {
 		if rf.commitIndex > rf.lastApplied {
 			applyMsgs := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.lastApplied)
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				if rf.realIdx(i) < 0 || rf.realIdx(i) >= len(rf.log) {
+					continue
+				}
 				applyMsgs = append(applyMsgs, raftapi.ApplyMsg{
 					CommandValid: true,
 					Command:      rf.log[rf.realIdx(i)].Command,
 					CommandIndex: i,
 				})
-				log.Printf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, i, rf.log[rf.realIdx(i)].Command)
-				// DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, i, rf.log[rf.realIdx(i)].Command)
 			}
 			rf.lastApplied = rf.commitIndex
-			rf.mu.Unlock()
 			for _, msg := range applyMsgs {
-				rf.applyCh <- msg
+				rf.applyChBuffer <- msg
 			}
-		} else {
-			rf.mu.Unlock()
 		}
+		rf.mu.Unlock()
 		time.Sleep(20 * time.Millisecond)
 	}
 }
@@ -798,6 +811,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.log = []LogEntry{{0, nil}} // 1-indexed
 	rf.applyCh = applyCh
+	rf.applyChBuffer = make(chan raftapi.ApplyMsg, 256)
 	rf.votedFor = -1
 	rf.leaderId = -1
 	rf.currentTerm = 0
@@ -818,6 +832,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// fmt.Printf("Initialized raft node %d\n", rf.me)
 	go rf.ticker()
 	go rf.applyCommit()
+	go rf.sendApplyMsg()
 
 	return rf
 }
