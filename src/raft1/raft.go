@@ -83,6 +83,15 @@ func truncateAndCopyAfter(log []LogEntry, index int) []LogEntry {
 	return newLog
 }
 
+func deepcopySnapshot(snapshot []byte) []byte {
+	if snapshot == nil {
+		return nil
+	}
+	newSnapshot := make([]byte, len(snapshot))
+	copy(newSnapshot, snapshot)
+	return newSnapshot
+}
+
 // convert global index to real index in rf.log
 func (rf *Raft) realIdx(i int) int {
 	return i - rf.lastIncludedIndex
@@ -297,11 +306,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.commitIndex = rf.lastIncludedIndex
 	needApplySnap := rf.lastApplied <= rf.lastIncludedIndex
 	rf.lastApplied = rf.lastIncludedIndex
-	rf.snapshot = args.Data
+	rf.snapshot = deepcopySnapshot(args.Data)
 	msg := raftapi.ApplyMsg{
 		CommandValid:  false,
 		SnapshotValid: true,
-		Snapshot:      rf.snapshot,
+		Snapshot:      deepcopySnapshot(rf.snapshot),
 		SnapshotTerm:  rf.lastIncludedTerm,
 		SnapshotIndex: rf.lastIncludedIndex,
 	}
@@ -413,7 +422,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log[0].Term = rf.lastIncludedTerm
 		DPrintf("[%d](term=%d) create snapshot at index %d\n", rf.me, rf.currentTerm, index)
 		rf.prtLog()
-		rf.snapshot = snapshot
+		rf.snapshot = deepcopySnapshot(snapshot)
 		rf.persist()
 		for i := range rf.peers {
 			if i != rf.me && rf.nextIndex[i] <= rf.lastIncludedIndex {
@@ -434,7 +443,7 @@ func (rf *Raft) callSendInstallSnapshot(server int) {
 		LeaderId:          rf.me,
 		LastIncludedIndex: rf.lastIncludedIndex,
 		LastIncludedTerm:  rf.lastIncludedTerm,
-		Data:              rf.snapshot,
+		Data:              deepcopySnapshot(rf.snapshot),
 	}
 	rf.mu.Unlock()
 	reply := &InstallSnapshotReply{}
@@ -661,7 +670,7 @@ func (rf *Raft) sendHeartbeat() {
 				go rf.callSendAppendEntries(i)
 			}
 		}
-		time.Sleep(35 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
