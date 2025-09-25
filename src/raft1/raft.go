@@ -20,6 +20,13 @@ import (
 	tester "6.5840/tester1"
 )
 
+type RaftState int
+const (
+	Follower RaftState = iota
+	Candidate
+	Leader
+)
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu            sync.Mutex          // Lock to protect shared access to this peer's state
@@ -27,6 +34,7 @@ type Raft struct {
 	persister     *tester.Persister   // Object to hold this peer's persisted state
 	me            int                 // this peer's index into peers[]
 	dead          int32               // set by Kill()
+	state		  RaftState
 	applyCh       chan raftapi.ApplyMsg
 	applyChBuffer chan raftapi.ApplyMsg
 
@@ -41,9 +49,7 @@ type Raft struct {
 
 	// additional state
 	heartbeat          bool
-	leaderId           int
 	votes              int
-	electionInProgress bool
 
 	// snapshot state
 	lastIncludedIndex int
@@ -115,7 +121,7 @@ func (rf *Raft) prtLog() {
 
 type RequestVoteArgs struct {
 	Term         int
-	CandidiateId int
+	CandidateId int
 	LastLogIndex int
 	LastLogTerm  int
 }
@@ -140,7 +146,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.leaderId = -1
+		rf.state = Follower
 		rf.persist()
 	}
 	if rf.votedFor != -1 {
@@ -149,17 +155,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	// if votedFor is null or candidateId
-	if rf.votedFor == -1 || rf.votedFor == args.CandidiateId {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		lastLogTerm := rf.log[len(rf.log)-1].Term
 		// need to convert to global index
 		lastLogIndex := rf.globalIdx(len(rf.log) - 1)
 		// at least as up-to-date as receiver's log
 		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
-			rf.votedFor = args.CandidiateId
+			rf.votedFor = args.CandidateId
+			rf.heartbeat = true
 			rf.persist()
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
-			DPrintf("[%d](term=%d) voted for [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
+			DPrintf("[%d](term=%d) voted for [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		} else {
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
@@ -180,7 +187,7 @@ func (rf *Raft) callSendRequestVote(server int, args *RequestVoteArgs) {
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
-			rf.leaderId = -1
+			rf.state = Follower
 			rf.persist()
 		}
 	}
@@ -281,7 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// reset election timeout and convert to follower
 	rf.currentTerm = args.Term
 	rf.heartbeat = true
-	rf.leaderId = args.LeaderId
+	rf.state = Follower
 	rf.persist()
 }
 
@@ -312,7 +319,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	// accept the InstallSnapshot RPC
 	DPrintf("[%d](term=%d) received InstallSnapshot from [%d](term=%d) lastIncludedIndex=%d lastIncludedTerm=%d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludedTerm)
-	rf.leaderId = args.LeaderId
+	rf.state = Follower
 	rf.currentTerm = args.Term
 	rf.persist()
 	reply.Term = rf.currentTerm
@@ -364,7 +371,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (3A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.currentTerm, rf.leaderId == rf.me
+	return rf.currentTerm, rf.state == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -454,8 +461,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 func (rf *Raft) callSendInstallSnapshot(server int) {
-	for !rf.killed() && rf.isLeader() {
+	for !rf.killed() {
 		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.nextIndex[server] > rf.lastIncludedIndex {
 			rf.mu.Unlock()
 			return
@@ -471,16 +482,16 @@ func (rf *Raft) callSendInstallSnapshot(server int) {
 		reply := &InstallSnapshotReply{}
 		if ok := rf.sendInstallSnapshot(server, args, reply); ok {
 			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
-				rf.leaderId = -1
+				rf.state = Follower
 				rf.persist()
 				return
 			}
 			rf.nextIndex[server] = rf.lastIncludedIndex + 1
 			rf.matchIndex[server] = rf.lastIncludedIndex
-			rf.mu.Unlock()
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -530,8 +541,12 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 }
 
 func (rf *Raft) checkCommit() {
-	for !rf.killed() && rf.isLeader() {
+	for !rf.killed() {
 		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
 		for n := rf.commitIndex + 1; n < rf.globalIdx(len(rf.log)); n++ {
 			if rf.realIdx(n) < 0 || rf.log[rf.realIdx(n)].Term != rf.currentTerm {
 				continue
@@ -568,7 +583,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	index, term := rf.globalIdx(len(rf.log)), rf.currentTerm
-	isLeader := rf.leaderId == rf.me
+	isLeader := rf.state == Leader
 
 	// Your code here (3B).
 	if isLeader {
@@ -608,33 +623,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) isLeader() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.leaderId == rf.me
-}
-
-func (rf *Raft) noHeartbeat() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return !rf.heartbeat
-}
-
-func (rf *Raft) resetHeartbeat() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.heartbeat = false
-}
-
-func (rf *Raft) noVote() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.votedFor == -1
-}
-
 func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -650,21 +639,25 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 }
 
 func (rf *Raft) callSendAppendEntries(server int) {
-	for !rf.killed() && rf.isLeader() {
+	for !rf.killed() {
 		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.nextIndex[server] <= rf.lastIncludedIndex {
 			go rf.callSendInstallSnapshot(server)
 			rf.mu.Unlock()
 		} else {
-			rf.mu.Unlock()
 			args := rf.buildAppendEntriesArgs(server)
+			rf.mu.Unlock()
 			reply := &AppendEntriesReply{}
 			if ok := rf.sendAppendEntries(server, args, reply); ok {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
-					rf.leaderId = -1
+					rf.state = Follower
 					rf.persist()
 					rf.mu.Unlock()
 					return
@@ -713,7 +706,13 @@ func (rf *Raft) callSendAppendEntries(server int) {
 }
 
 func (rf *Raft) sendHeartbeat() {
-	for !rf.killed() && rf.isLeader() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
 		for i := range rf.peers {
 			if i != rf.me {
 				go rf.callSendAppendEntries(i)
@@ -726,7 +725,7 @@ func (rf *Raft) sendHeartbeat() {
 func (rf *Raft) startAsLeader() {
 	rf.mu.Lock()
 	DPrintf("[%d](term=%d) became leader", rf.me, rf.currentTerm)
-	rf.leaderId = rf.me
+	rf.state = Leader
 	for i := range rf.peers {
 		rf.nextIndex[i] = rf.globalIdx(len(rf.log))
 		rf.matchIndex[i] = 1
@@ -753,7 +752,7 @@ func (rf *Raft) checkElection() {
 	for !rf.killed() {
 		// check if election timeout or a leader has been elected
 		rf.mu.Lock()
-		if electionTerm != rf.currentTerm || rf.leaderId != -1 {
+		if electionTerm != rf.currentTerm || rf.state != Candidate {
 			rf.mu.Unlock()
 			return
 		}
@@ -775,10 +774,10 @@ func (rf *Raft) startElection() {
 	rf.currentTerm += 1
 	rf.persist()
 	rf.votes = 1
-	rf.leaderId = -1
+	rf.state = Candidate
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
-		CandidiateId: rf.me,
+		CandidateId: rf.me,
 		LastLogIndex: rf.globalIdx(len(rf.log) - 1),
 		LastLogTerm:  rf.log[len(rf.log)-1].Term,
 	}
@@ -830,36 +829,34 @@ func (rf *Raft) applyCommit() {
 }
 
 func (rf *Raft) ticker() {
-	for !rf.killed() {
-		// For followers: if election timeout elapses without
-		// - receiving AppendEntries RPCs from current leader i.e. no heartbeat
-		// - granting vote to candidate
-		// convert to candidate and start election
-		// For candidates: if election timeout elapses without
-		// - election won
-		// - receiving AppendEntries RPCs from new leader
-		// convert to candidate and start new election
-		rf.mu.Lock()
-		isLeader := rf.leaderId == rf.me
-		heartbeatReceived := rf.heartbeat
-		electionInProgress := rf.electionInProgress
-		rf.heartbeat = false // Reset heartbeat flag for the next cycle
-		rf.mu.Unlock()
+    for !rf.killed() {
+        timeout := time.Duration(50+rand.Intn(300)) * time.Millisecond
 
-		if !isLeader && !heartbeatReceived && !electionInProgress {
-			electionInProgress = true
-			go func() {
-				rf.startElection()
-				electionInProgress = false
-			}()
-		}
+        rf.mu.Lock()
+        if rf.state == Leader {
+            rf.mu.Unlock()
+            time.Sleep(50 * time.Millisecond)
+            continue
+        }
 
-		rf.resetHeartbeat()
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-	}
+        if rf.heartbeat {
+            rf.heartbeat = false
+            rf.mu.Unlock()
+            time.Sleep(timeout)
+            continue
+        }
+        rf.mu.Unlock()
+
+        time.Sleep(timeout)
+
+        rf.mu.Lock()
+        if !rf.heartbeat && rf.state != Leader {
+            rf.state = Candidate
+            go rf.startElection()
+        }
+        rf.heartbeat = false
+        rf.mu.Unlock()
+    }
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -881,9 +878,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.log = []LogEntry{{0, nil}} // 1-indexed
 	rf.applyCh = applyCh
-	rf.applyChBuffer = make(chan raftapi.ApplyMsg, 256)
+	rf.applyChBuffer = make(chan raftapi.ApplyMsg, 1024)
 	rf.votedFor = -1
-	rf.leaderId = -1
+	rf.state = Follower
 	rf.currentTerm = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
