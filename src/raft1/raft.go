@@ -22,13 +22,13 @@ import (
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu                sync.Mutex          // Lock to protect shared access to this peer's state
-	peers             []*labrpc.ClientEnd // RPC end points of all peers
-	persister         *tester.Persister   // Object to hold this peer's persisted state
-	me                int                 // this peer's index into peers[]
-	dead              int32               // set by Kill()
-	applyCh           chan raftapi.ApplyMsg
-	applyChBuffer	  chan raftapi.ApplyMsg
+	mu            sync.Mutex          // Lock to protect shared access to this peer's state
+	peers         []*labrpc.ClientEnd // RPC end points of all peers
+	persister     *tester.Persister   // Object to hold this peer's persisted state
+	me            int                 // this peer's index into peers[]
+	dead          int32               // set by Kill()
+	applyCh       chan raftapi.ApplyMsg
+	applyChBuffer chan raftapi.ApplyMsg
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
@@ -40,9 +40,10 @@ type Raft struct {
 	log         []LogEntry
 
 	// additional state
-	heartbeat bool
-	leaderId  int
-	votes     int
+	heartbeat          bool
+	leaderId           int
+	votes              int
+	electionInProgress bool
 
 	// snapshot state
 	lastIncludedIndex int
@@ -159,6 +160,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			reply.Term = rf.currentTerm
 			DPrintf("[%d](term=%d) voted for [%d](term=%d)\n", rf.me, rf.currentTerm, args.CandidiateId, args.Term)
+		} else {
+			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
 		}
 	}
 }
@@ -196,8 +200,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -221,6 +227,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= rf.globalIdx(len(rf.log)) || rf.log[rf.realIdx(args.PrevLogIndex)].Term != args.PrevLogTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		if args.PrevLogIndex >= rf.globalIdx(len(rf.log)) {
+			// Case 1: Follower's log is too short.
+			reply.ConflictIndex = rf.globalIdx(len(rf.log))
+			reply.ConflictTerm = -1 // Sentinel value indicates log is too short
+		} else {
+			// Case 2: Term mismatch.
+			reply.ConflictTerm = rf.log[rf.realIdx(args.PrevLogIndex)].Term
+			// Find the first index of the conflicting term.
+			firstIndex := args.PrevLogIndex
+			for firstIndex > rf.lastIncludedIndex && rf.log[rf.realIdx(firstIndex-1)].Term == reply.ConflictTerm {
+				firstIndex--
+			}
+			reply.ConflictIndex = firstIndex
+		}
 		return
 	}
 
@@ -450,7 +470,7 @@ func (rf *Raft) callSendInstallSnapshot(server int) {
 		rf.mu.Unlock()
 		reply := &InstallSnapshotReply{}
 		if ok := rf.sendInstallSnapshot(server, args, reply); ok {
-			rf.mu.Lock() 
+			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
@@ -461,8 +481,9 @@ func (rf *Raft) callSendInstallSnapshot(server int) {
 			rf.nextIndex[server] = rf.lastIncludedIndex + 1
 			rf.matchIndex[server] = rf.lastIncludedIndex
 			rf.mu.Unlock()
+			return
 		}
-		time.Sleep(35 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -655,7 +676,31 @@ func (rf *Raft) callSendAppendEntries(server int) {
 					return
 				} else {
 					// optimize by fast backoff
-					rf.nextIndex[server] = (rf.nextIndex[server] + 1) / 2
+					if reply.ConflictTerm == -1 {
+						// Follower's log is too short, jump to the end of its log
+						rf.nextIndex[server] = reply.ConflictIndex
+					} else {
+						// Search for the last entry in leader's log with ConflictTerm
+						lastIndexWithConflictTerm := -1
+						for i := args.PrevLogIndex; i > rf.lastIncludedIndex; i-- {
+							if rf.realIdx(i-1) >= len(rf.log) || rf.realIdx(i-1) < 0 {
+								continue
+							}
+							if rf.log[rf.realIdx(i-1)].Term == reply.ConflictTerm {
+								lastIndexWithConflictTerm = i
+								break
+							}
+						}
+						if lastIndexWithConflictTerm != -1 {
+							// If found, set nextIndex to the index after that entry
+							rf.nextIndex[server] = lastIndexWithConflictTerm
+						} else {
+							// If not found, leader doesn't have ConflictTerm,
+							// so jump to the first index of that term on the follower
+							rf.nextIndex[server] = reply.ConflictIndex
+						}
+					}
+					// Ensure nextIndex is at least 1
 					if rf.nextIndex[server] < 1 {
 						rf.nextIndex[server] = 1
 					}
@@ -794,8 +839,19 @@ func (rf *Raft) ticker() {
 		// - election won
 		// - receiving AppendEntries RPCs from new leader
 		// convert to candidate and start new election
-		if !rf.isLeader() && (rf.noHeartbeat() || rf.noVote()) {
-			go rf.startElection()
+		rf.mu.Lock()
+		isLeader := rf.leaderId == rf.me
+		heartbeatReceived := rf.heartbeat
+		electionInProgress := rf.electionInProgress
+		rf.heartbeat = false // Reset heartbeat flag for the next cycle
+		rf.mu.Unlock()
+
+		if !isLeader && !heartbeatReceived && !electionInProgress {
+			electionInProgress = true
+			go func() {
+				rf.startElection()
+				electionInProgress = false
+			}()
 		}
 
 		rf.resetHeartbeat()
