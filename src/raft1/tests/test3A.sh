@@ -1,0 +1,1 @@
+python ../dstest.py TestInitialElection3A TestReElection3A TestManyElections3A -n 1000 -p 32

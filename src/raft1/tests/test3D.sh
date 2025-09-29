@@ -1,0 +1,1 @@
+python ../dstest.py TestSnapshotBasic3D TestSnapshotInstall3D TestSnapshotInstallUnreliable3D TestSnapshotInstallCrash3D TestSnapshotInstallUnCrash3D TestSnapshotAllCrash3D TestSnapshotInit3D -n 100 -p 32
