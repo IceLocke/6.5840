@@ -729,7 +729,7 @@ func (rf *Raft) startAsLeader() {
 	rf.state = Leader
 	for i := range rf.peers {
 		rf.nextIndex[i] = rf.globalIdx(len(rf.log))
-		rf.matchIndex[i] = 1
+		rf.matchIndex[i] = 0
 	}
 	rf.mu.Unlock()
 
