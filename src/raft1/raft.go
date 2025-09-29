@@ -617,7 +617,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
 }
 
 func (rf *Raft) killed() bool {
@@ -703,7 +702,7 @@ func (rf *Raft) callSendAppendEntries(server int) {
 				}
 			}
 		}
-		time.Sleep(35 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -720,7 +719,7 @@ func (rf *Raft) sendHeartbeat() {
 				go rf.callSendAppendEntries(i)
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -797,6 +796,8 @@ func (rf *Raft) startElection() {
 func (rf *Raft) sendApplyMsg() {
 	for msg := range rf.applyChBuffer {
 		if rf.killed() {
+			close(rf.applyChBuffer)
+			close(rf.applyCh)
 			return
 		}
 		rf.applyCh <- msg
@@ -821,6 +822,10 @@ func (rf *Raft) applyCommit() {
 			}
 			rf.lastApplied = rf.commitIndex
 			for _, msg := range applyMsgs {
+				if rf.killed() {
+					rf.mu.Unlock()
+					return
+				}
 				DPrintf("[%d](term=%d) apply log at index %d: %.8v\n", rf.me, rf.currentTerm, msg.CommandIndex, msg.Command)
 				rf.applyChBuffer <- msg
 			}
@@ -832,7 +837,7 @@ func (rf *Raft) applyCommit() {
 
 func (rf *Raft) ticker() {
     for !rf.killed() {
-        timeout := time.Duration(50+rand.Intn(300)) * time.Millisecond
+        timeout := time.Duration(300+rand.Intn(200)) * time.Millisecond
 
         rf.mu.Lock()
         if rf.state == Leader {
