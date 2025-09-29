@@ -329,18 +329,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	DPrintf("[%d](term=%d) install snapshot lastIncludedIndex %d -> %d, lastIncludedTerm %d -> %d\n", rf.me, rf.currentTerm, rf.lastIncludedIndex, args.LastIncludedIndex, rf.lastIncludedTerm, args.LastIncludedTerm)
-	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
-	rf.commitIndex = rf.lastIncludedIndex
-	needApplySnap := rf.lastApplied <= rf.lastIncludedIndex
-	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	needApplySnap := rf.lastApplied <= args.LastIncludedIndex
 	rf.snapshot = deepcopySnapshot(args.Data)
 	msg := raftapi.ApplyMsg{
 		CommandValid:  false,
 		SnapshotValid: true,
 		Snapshot:      deepcopySnapshot(rf.snapshot),
-		SnapshotTerm:  rf.lastIncludedTerm,
-		SnapshotIndex: rf.lastIncludedIndex,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
 	}
 
 	// if existing log entry has same index and term as snapshot's
@@ -348,21 +346,25 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		if args.LastIncludedIndex < rf.globalIdx(len(rf.log)) && rf.log[rf.realIdx(args.LastIncludedIndex)].Term == args.LastIncludedTerm {
 			rf.log = truncateAndCopyAfter(rf.log, rf.realIdx(args.LastIncludedIndex))
 			rf.log[0].Term = args.LastIncludedTerm
+			rf.lastIncludedIndex = args.LastIncludedIndex
 			rf.persist()
 			if needApplySnap {
 				go func() { rf.applyChBuffer <- msg }()
+				rf.lastApplied = rf.lastIncludedIndex
 			}
 			DPrintf("[%d](term=%d) keep log after snapshot: ", rf.me, rf.currentTerm)
 			rf.prtLog()
 			return
 		}
 	}
-
+	rf.lastIncludedIndex = args.LastIncludedIndex
 	// DPrintf("[%d](term=%d) discard log and keep only snapshot\n", rf.me, rf.currentTerm)
 	rf.log = []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
 	go func() { rf.applyChBuffer <- msg }()
+	rf.lastApplied = rf.lastIncludedIndex
 	rf.prtLog()
 	rf.heartbeat = true
+	rf.persist()
 }
 
 // return currentTerm and whether this server
