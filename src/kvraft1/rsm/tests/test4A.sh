@@ -1,1 +1,1 @@
-python ../../dstest.py TestBasic4A TestConcurrent4A TestLeaderFailure4A TestLeaderPartition4A TestRestartReplay4A TestShutdown4A TestRestartSubmit4A  -n 100 -p 16
+python ../../dstest.py TestBasic4A TestConcurrent4A TestLeaderFailure4A TestLeaderPartition4A TestRestartReplay4A TestShutdown4A TestRestartSubmit4A -r -n 100 -p 16
