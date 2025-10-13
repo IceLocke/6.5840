@@ -2,8 +2,11 @@ package rsm
 
 import (
 	// "log"
+	"context"
+	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -51,6 +54,7 @@ type RSM struct {
 	sm           StateMachine
 	// Your definitions here.
 	waitingReq map[int]ReqChan // index -> chan to receive result
+	dead  	 	int32
 }
 
 // servers[] contains the ports of the set of
@@ -87,8 +91,30 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+func (rsm *RSM) Kill() {
+	atomic.StoreInt32(&rsm.dead, 1)
+
+    rsm.mu.Lock()
+    defer rsm.mu.Unlock()
+    for index, reqCh := range rsm.waitingReq {
+        close(reqCh.ch)
+        delete(rsm.waitingReq, index)
+    }
+}
+
+func (rsm *RSM) killed() bool {
+	z := atomic.LoadInt32(&rsm.dead)
+	return z == 1
+}
+
 func (rsm *RSM) read() {
-	for msg := range rsm.applyCh {
+	for {
+		msg, ok := <-rsm.applyCh
+		if !ok {
+			fmt.Printf("RSM %d killed\n", rsm.me)
+			rsm.Kill()
+			return
+		}
 		rsm.mu.Lock()
 		if msg.CommandValid {
 			res := rsm.sm.DoOp(msg.Command.(Op).Req)
@@ -103,6 +129,32 @@ func (rsm *RSM) read() {
 	}
 }
 
+func (rsm *RSM) checkRequestValid(cancel context.CancelFunc, index int, term int, id int) {
+	defer cancel()
+	for {
+		if rsm.killed() {
+			fmt.Printf("RSM %d canceled task %d[%d] due to shutdown\n", rsm.me, index, term)
+			return
+		}
+		rsm.mu.Lock()
+		// check if still leader
+		curTerm, isLeader := rsm.rf.GetState()
+		if !isLeader || curTerm != term {
+			rsm.mu.Unlock()
+			return
+		}
+		// check if request is still waiting
+		if reqCh, ok := rsm.waitingReq[index]; ok && reqCh.id == id {
+			if term != reqCh.term {
+				rsm.mu.Unlock()
+				return
+			}
+		}
+		rsm.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
@@ -112,8 +164,14 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
 	// is the argument to Submit and id is a unique id for the op.
 
+	if rsm.killed() {
+        return rpc.ErrWrongLeader, nil
+    }
 	// your code here
 	rsm.mu.Lock()
+	if rsm.killed() {
+		return rpc.ErrWrongLeader, nil
+	}
 	op := Op{Me: rsm.me, Id: rand.Int(), Req: req}
 	index, term, isLeader := rsm.rf.Start(op)
 	if !isLeader {
@@ -122,14 +180,19 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	}
 
 	ch := make(chan any, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2 * time.Second)
+	go rsm.checkRequestValid(cancel, index, term, op.Id)
 	// log.Printf("rsm: submit op: %v, term: %d, index: %d\n", op, term, index)
 	rsm.waitingReq[index] = ReqChan{ch: ch, term: term, id: op.Id}
 	rsm.mu.Unlock()
 
 	select {
-	case res := <-ch:
+	case res, ok := <-ch:
 		rsm.mu.Lock()
 		defer rsm.mu.Unlock()
+		if !ok || rsm.killed() {
+            return rpc.ErrWrongLeader, nil
+        }
 		// check if still leader
 		term, isLeader := rsm.rf.GetState()
 		if !isLeader || term != rsm.waitingReq[index].term {
@@ -142,10 +205,10 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		} else {
 			return rpc.ErrWrongLeader, nil
 		}
-	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
 		rsm.mu.Lock()
-		delete(rsm.waitingReq, index)
 		defer rsm.mu.Unlock()
+		delete(rsm.waitingReq, index)
 		return rpc.ErrWrongLeader, nil
 	}
 }

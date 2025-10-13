@@ -794,14 +794,14 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) sendApplyMsg() {
-	for msg := range rf.applyChBuffer {
-		if rf.killed() {
-			close(rf.applyChBuffer)
-			close(rf.applyCh)
-			return
-		}
-		rf.applyCh <- msg
+	for !rf.killed() {
+		rf.applyCh <- <- rf.applyChBuffer
+		time.Sleep(time.Millisecond)
 	}
+	rf.mu.Lock()
+	close(rf.applyCh)
+	close(rf.applyChBuffer)
+	rf.mu.Unlock()
 }
 
 // Started as a goroutine to apply committed entries to state machine
