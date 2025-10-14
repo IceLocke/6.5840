@@ -3,7 +3,6 @@ package rsm
 import (
 	// "log"
 	"context"
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -110,8 +109,9 @@ func (rsm *RSM) killed() bool {
 func (rsm *RSM) read() {
 	for {
 		msg, ok := <-rsm.applyCh
+		DPrintf("RSM %d receive apply msg: %v\n", rsm.me, msg)
 		if !ok {
-			fmt.Printf("RSM %d killed\n", rsm.me)
+			DPrintf("RSM %d killed\n", rsm.me)
 			rsm.Kill()
 			return
 		}
@@ -119,7 +119,16 @@ func (rsm *RSM) read() {
 		if msg.CommandValid {
 			res := rsm.sm.DoOp(msg.Command.(Op).Req)
 			if reqChan, ok := rsm.waitingReq[msg.CommandIndex]; ok {
-				reqChan.ch <- res
+				DPrintf("RSM %d, find waiting req at index %d: %d\n", rsm.me, msg.CommandIndex, reqChan.id)
+				term, isLeader := rsm.rf.GetState()
+				if reqChan.term != term || !isLeader {
+					DPrintf("RSM %d, req %d at index %d term %d no longer valid, current term %d isLeader %v\n", rsm.me, reqChan.id, msg.CommandIndex, reqChan.term, term, isLeader)
+				} else {
+					DPrintf("RSM %d, req %d at index %d term %d is valid, applied %v\n", rsm.me, reqChan.id, msg.CommandIndex, reqChan.term, msg.Command)
+					reqChan.ch <- res
+				}
+			} else {
+				DPrintf("RSM %d, no waiting req at index %d, applied %v\n", rsm.me, msg.CommandIndex, msg.Command)	
 			}
 			// TODO: snapshot truncate
 		} // else if msg.SnapshotValid {
@@ -133,7 +142,7 @@ func (rsm *RSM) checkRequestValid(cancel context.CancelFunc, index int, term int
 	defer cancel()
 	for {
 		if rsm.killed() {
-			fmt.Printf("RSM %d canceled task %d[%d] due to shutdown\n", rsm.me, index, term)
+			// fmt.Printf("RSM %d canceled task %d[%d] due to shutdown\n", rsm.me, index, term)
 			return
 		}
 		rsm.mu.Lock()
@@ -182,7 +191,11 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	ch := make(chan any, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 2 * time.Second)
 	go rsm.checkRequestValid(cancel, index, term, op.Id)
-	// log.Printf("rsm: submit op: %v, term: %d, index: %d\n", op, term, index)
+	DPrintf("RSM server %d, submit op %v at index %d term %d\n", rsm.me, op, index, term)
+	if _, ok := rsm.waitingReq[index]; ok {
+		return rpc.ErrWrongLeader, nil
+	}
+
 	rsm.waitingReq[index] = ReqChan{ch: ch, term: term, id: op.Id}
 	rsm.mu.Unlock()
 

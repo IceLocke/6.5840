@@ -2,6 +2,8 @@ package kvraft
 
 import (
 	"sync"
+	"time"
+
 
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
@@ -34,6 +36,7 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
+	DPrintf("Clerk get %s\n", key)
 	for {
 		ck.mu.Lock()
 		lastLeader := ck.lastLeader
@@ -44,6 +47,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 		if ok {
 			switch reply.Err {
 			case rpc.OK, rpc.ErrNoKey: // normal return
+				DPrintf("Clerk get from %d, err=%v %s=%s@%d\n", lastLeader, reply.Err, key, reply.Value, reply.Version)
 				return reply.Value, reply.Version, reply.Err
 			case rpc.ErrWrongLeader:
 				ck.mu.Lock()
@@ -54,7 +58,13 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 				continue // try another server
 			}
 		}
-		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+		ck.mu.Lock()
+		if ck.lastLeader == lastLeader {
+			ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+		}
+		DPrintf("Clerk put try another server %d\n", ck.lastLeader)
+		ck.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -77,24 +87,40 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	for isFirstRPC := true; ; isFirstRPC = false {
+	DPrintf("Clerk put %s=%s@%d\n", key, value, version)
+	for isFirstRPC, cnt := true, 0; ; isFirstRPC, cnt = false, cnt + 1 {
 		args := rpc.PutArgs{Key: key, Value: value, Version: version}
 		reply := rpc.PutReply{}
-		ok := ck.clnt.Call(ck.servers[ck.lastLeader], "KVServer.Put", &args, &reply)
+		ck.mu.Lock()
+		lastLeader := ck.lastLeader
+		ck.mu.Unlock()
+		ok := ck.clnt.Call(ck.servers[lastLeader], "KVServer.Put", &args, &reply)
 		if ok {
 			switch reply.Err {
-			case rpc.OK: // normal return
+			case rpc.OK, rpc.ErrNoKey: // normal return
+				DPrintf("Clerk put to %d, err=%v %s=%s@%d\n", lastLeader, reply.Err, key, value, version)
 				return reply.Err
 			case rpc.ErrVersion:
+				DPrintf("Clerk put to %d, err=%v %s=%s@%d\n", lastLeader, reply.Err, key, value, version)
 				if isFirstRPC {
 					return rpc.ErrVersion
 				}
 				return rpc.ErrMaybe
 			case rpc.ErrWrongLeader:
-				ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+				ck.mu.Lock()
+				if ck.lastLeader == lastLeader {
+					ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+				}
+				ck.mu.Unlock()
 				continue // try another server
 			}
 		}
-		ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+		ck.mu.Lock()
+		if cnt > 10 && ck.lastLeader == lastLeader {
+			cnt = 0
+			ck.lastLeader = (ck.lastLeader + 1) % len(ck.servers)
+		}
+		ck.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
