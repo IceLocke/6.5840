@@ -350,7 +350,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			rf.persist()
 			if needApplySnap {
 				go func() { rf.applyChBuffer <- msg }()
-				rf.lastApplied = rf.lastIncludedIndex
+				rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
 			}
 			DPrintf("[%d](term=%d) keep log after snapshot: ", rf.me, rf.currentTerm)
 			rf.prtLog()
@@ -361,7 +361,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// DPrintf("[%d](term=%d) discard log and keep only snapshot\n", rf.me, rf.currentTerm)
 	rf.log = []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
 	go func() { rf.applyChBuffer <- msg }()
-	rf.lastApplied = rf.lastIncludedIndex
+	rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
 	rf.prtLog()
 	rf.heartbeat = true
 	rf.persist()
@@ -820,7 +820,7 @@ func (rf *Raft) applyCommit() {
 					CommandIndex: i,
 				})
 			}
-			rf.lastApplied = rf.commitIndex
+			rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
 			for _, msg := range applyMsgs {
 				if rf.killed() {
 					rf.mu.Unlock()
