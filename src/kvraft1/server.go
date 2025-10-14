@@ -24,6 +24,55 @@ type KVServer struct {
 	version map[string]rpc.Tversion
 }
 
+func (kv *KVServer) doGet(req *rpc.GetArgs) rpc.GetReply {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	reply := rpc.GetReply{}
+	DPrintf("KVServer %d Get request: %v\n", kv.me, req)
+	if val, ok := kv.kv[req.Key]; ok {
+		reply.Value = val
+		reply.Version = kv.version[req.Key]
+		reply.Err = rpc.OK
+	} else {
+		reply.Value = ""
+		reply.Version = 0
+		reply.Err = rpc.ErrNoKey
+	}
+	return reply
+}
+
+func (kv *KVServer) doPut(req *rpc.PutArgs) rpc.PutReply {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	reply := rpc.PutReply{}
+	DPrintf("KVServer %d Put request: %v\n", kv.me, req)
+	curVer, ok := kv.version[req.Key]
+	if !ok {
+		DPrintf("KVServer %d Put new key %s\n", kv.me, req.Key)
+		if req.Version != 0 {
+			DPrintf("KVServer %d Put version mismatch for new key %s: req.Version=%d\n", kv.me, req.Key, req.Version)
+			reply.Err = rpc.ErrVersion
+			return reply
+		}
+		DPrintf("KVServer %d Put new key %s success\n", kv.me, req.Key)
+		kv.kv[req.Key] = req.Value
+		kv.version[req.Key] = 1
+		reply.Err = rpc.OK
+	} else {
+		DPrintf("KVServer %d Put existing key %s current version %d\n", kv.me, req.Key, curVer)
+		if req.Version != curVer {
+			DPrintf("KVServer %d Put version mismatch for key %s: req.Version=%d curVer=%d\n", kv.me, req.Key, req.Version, curVer)
+			reply.Err = rpc.ErrVersion
+			return reply
+		}
+		DPrintf("KVServer %d Put existing key %s success\n", kv.me, req.Key)
+		kv.kv[req.Key] = req.Value
+		kv.version[req.Key]++
+		reply.Err = rpc.OK
+	}
+	return reply
+}
+
 // To type-cast req to the right type, take a look at Go's type switches or type
 // assertions below:
 //
@@ -32,50 +81,13 @@ type KVServer struct {
 func (kv *KVServer) DoOp(req any) any {
 	switch req := req.(type) {
 	case *rpc.GetArgs:
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		reply := rpc.GetReply{}
-		DPrintf("KVServer %d Get request: %v\n", kv.me, req)
-		if val, ok := kv.kv[req.Key]; ok {
-			reply.Value = val
-			reply.Version = kv.version[req.Key]
-			reply.Err = rpc.OK
-		} else {
-			reply.Value = ""
-			reply.Version = 0
-			reply.Err = rpc.ErrNoKey
-		}
-		return reply
+		return kv.doGet(req)
+	case rpc.GetArgs:
+		return kv.doGet(&req)
 	case *rpc.PutArgs:
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		reply := rpc.PutReply{}
-		DPrintf("KVServer %d Put request: %v\n", kv.me, req)
-		curVer, ok := kv.version[req.Key]
-        if !ok {
-			DPrintf("KVServer %d Put new key %s\n", kv.me, req.Key)
-            if req.Version != 0 {
-				DPrintf("KVServer %d Put version mismatch for new key %s: req.Version=%d\n", kv.me, req.Key, req.Version)
-                reply.Err = rpc.ErrVersion
-                return reply
-            }
-			DPrintf("KVServer %d Put new key %s success\n", kv.me, req.Key)
-            kv.kv[req.Key] = req.Value
-            kv.version[req.Key] = 1
-            reply.Err = rpc.OK
-        } else {
-			DPrintf("KVServer %d Put existing key %s current version %d\n", kv.me, req.Key, curVer)
-            if req.Version != curVer {
-				DPrintf("KVServer %d Put version mismatch for key %s: req.Version=%d curVer=%d\n", kv.me, req.Key, req.Version, curVer)
-                reply.Err = rpc.ErrVersion
-                return reply
-            }
-			DPrintf("KVServer %d Put existing key %s success\n", kv.me, req.Key)
-            kv.kv[req.Key] = req.Value
-            kv.version[req.Key]++
-            reply.Err = rpc.OK
-        }
-        return reply
+		return kv.doPut(req)
+	case rpc.PutArgs:
+		return kv.doPut(&req)
 	default:
 		panic(fmt.Sprintf("unknown request type: %v", req))
 	}

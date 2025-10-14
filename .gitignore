@@ -4,3 +4,4 @@ bin/
 src/.DS_Store
 *.log
 *.out
+log.txt
