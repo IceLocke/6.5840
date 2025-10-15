@@ -1,0 +1,1 @@
+python ../dstest.py TestBasicAgree3B TestRPCBytes3B TestFollowerFailure3B TestLeaderFailure3B TestFailAgree3B TestFailNoAgree3B TestConcurrentStarts3B TestRejoin3B TestBackup3B TestCount3B -n 100 -p 8

@@ -1,0 +1,1 @@
+python ../../dstest.py TestBasic4A TestConcurrent4A TestLeaderFailure4A TestLeaderPartition4A TestRestartReplay4A TestShutdown4A TestRestartSubmit4A -n 1000 -p 32

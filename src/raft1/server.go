@@ -119,10 +119,6 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 
 // periodically snapshot raft state
 func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
-	if rs.raft == nil {
-		return // ???
-	}
-
 	for m := range applyCh {
 		err_msg := ""
 		if m.SnapshotValid {
@@ -152,7 +148,14 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 				}
 				e.Encode(xlog)
 				start := tester.GetAnnotateTimestamp()
-				rs.raft.Snapshot(m.CommandIndex, w.Bytes())
+				rs.mu.Lock()
+				if rs.raft == nil {
+					rs.mu.Unlock()
+					return
+				} else {
+					rs.raft.Snapshot(m.CommandIndex, w.Bytes())
+					rs.mu.Unlock()
+				}
 				details := fmt.Sprintf(
 					"snapshot created after applying the command at index %v",
 					m.CommandIndex)
